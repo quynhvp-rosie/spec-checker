@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spec Checker – Widget</title>
+<link rel="stylesheet" href="https://assets.crisp.chat/widget/stylesheets/widget.min.css" type="text/css">
+<style>
+  .info { padding: 4px 0 8px; font-size: 12px; opacity: .8; }
+  .row { display: flex; gap: 6px; flex-wrap: wrap; }
+</style>
+</head>
+<body>
+<div class="caw-widget">
+  <div class="caw-widget-section" data-deployed="true">
+    <div class="caw-widget-section-header">📐 Spec Checker</div>
+    <div class="caw-widget-section-body">
+      <div class="info" id="info">Đang đọc hội thoại...</div>
+      <div class="row">
+        <span class="caw-widget-button" data-color="blue" id="open">Mở bộ kiểm tra</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+  let images = [];      // ảnh khách gửi trong hội thoại
+  let modalOpen = false;
+  let links = [];       // link kho ảnh ngoài khách gửi (Drive folder, Dropbox, WeTransfer...)
+
+  // Tìm link Drive/kho lưu trữ trong tin nhắn text của khách
+  const LINK_RE = /https?:\/\/(?:drive\.google\.com|docs\.google\.com|drive\.app\.goo\.gl|(?:www\.)?dropbox\.com|(?:www\.)?wetransfer\.com|we\.tl|1drv\.ms|onedrive\.live\.com|(?:www\.)?icloud\.com\/share|mega\.nz|(?:www\.)?box\.com)[^\s<>"')\]]*/gi;
+  function extractLinks(conv) {
+    const out = [], seen = {};
+    (conv && conv.messages || []).forEach((m) => {
+      if (m.from !== "user" || m.type !== "text" || typeof m.content !== "string") return;
+      (m.content.match(LINK_RE) || []).forEach((u) => {
+        u = u.replace(/[.,;!?]+$/, "");
+        if (!seen[u]) { seen[u] = true; out.push({ url: u }); }
+      });
+    });
+    return out;
+  }
+
+  // Lấy ảnh do khách gửi từ dữ liệu hội thoại Crisp (cần scope website:conversation:messages)
+  function extractImages(conv) {
+    const out = [], seen = {};
+    (conv && conv.messages || []).forEach((m) => {
+      if (m.from !== "user") return;
+      const c = m.content;
+      let url = null, name = null;
+      if (m.type === "file" && c && typeof c === "object" && String(c.type || "").startsWith("image/")) {
+        url = c.url; name = c.name;
+      } else if (m.type === "picture") {
+        url = typeof c === "string" ? c : (c && c.url);
+      }
+      if (url && !seen[url]) {
+        seen[url] = true;
+        out.push({ url, name: name || decodeURIComponent(url.split("?")[0].split("/").pop() || "image") });
+      }
+    });
+    return out;
+  }
+
+  function sendToModal() {
+    $crisp.forwardEvent("modal", { type: "images", images, links, count: images.length });
+  }
+
+  function refresh() { $crisp.acquireData("conversation"); }
+
+  window.CRISP_READY_TRIGGER = function () {
+    $crisp.onDataAcquired = (ns) => {
+      if (ns !== "conversation") return;
+      const conv = $crisp.data.conversation;
+      if (!conv || !conv.messages) {
+        document.getElementById("info").textContent =
+          "Chưa đọc được tin nhắn. Kiểm tra token scope website:conversation:messages (read).";
+      } else {
+        images = extractImages(conv);
+        links = extractLinks(conv);
+        let t = images.length
+          ? `Khách đã gửi ${images.length} ảnh trong chat này.`
+          : "Khách chưa gửi ảnh nào trong chat này.";
+        if (links.length) t += ` Có ${links.length} link Drive/kho ảnh — mở bộ kiểm tra để xem hướng dẫn.`;
+        document.getElementById("info").textContent = t;
+      }
+      $crisp.setHeight(document.body.scrollHeight);
+      if (modalOpen) sendToModal(); // modal đang mở thì cập nhật luôn
+    };
+
+    // Modal báo đã sẵn sàng / yêu cầu lấy lại ảnh
+    $crisp.onEventForwarded = (p) => {
+      if (p && p.type === "modal-ready") { refresh(); setTimeout(sendToModal, 300); }
+    };
+    $crisp.onModalClose = () => { modalOpen = false; };
+
+    refresh();
+    $crisp.setHeight(document.body.scrollHeight);
+  };
+
+  document.getElementById("open").addEventListener("click", () => {
+    modalOpen = true;
+    refresh();
+    const url = new URL("modal.html", location.href).href; // cùng thư mục với widget.html
+    $crisp.showModal(url, "wide"); // size: normal | medium | large | wide
+  });
+</script>
+<script src="https://assets.crisp.chat/widget/javascripts/sdk.min.js"></script>
+</body>
+</html>

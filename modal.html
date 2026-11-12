@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spec Checker – Modal</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  :root { --bg:#fff; --fg:#1f2937; --muted:#6b7280; --line:#e5e7eb; --ok:#16a34a; --bad:#dc2626; --brand:#2563eb; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; margin:0; }
+  body { font:14px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--fg); display:flex; flex-direction:column; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  header h1 { font-size:16px; margin:0 auto 0 0; }
+  main { flex:1; overflow:auto; padding:0 16px 16px; }
+  button, select { font:inherit; padding:7px 12px; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--fg); cursor:pointer; }
+  button.primary { background:var(--brand); color:#fff; border-color:var(--brand); }
+  button:disabled { opacity:.5; cursor:default; }
+  .tabs { display:flex; gap:4px; }
+  .tabs button.active { background:var(--brand); color:#fff; border-color:var(--brand); }
+  .drop { border:2px dashed var(--line); border-radius:8px; padding:10px; text-align:center; color:var(--muted); margin:12px 0; }
+  .drop.over { border-color:var(--brand); }
+  table { width:100%; border-collapse:collapse; }
+  th { position:sticky; top:0; background:#fff; z-index:1; }
+  td, th { padding:6px 4px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle; }
+  canvas.th { width:64px; height:64px; border-radius:4px; display:block; }
+  .ok { color:var(--ok); font-weight:600; } .bad { color:var(--bad); font-weight:600; }
+  .muted { color:var(--muted); }
+  .box { margin:10px 0; padding:8px 10px; border-radius:6px; background:var(--line); }
+  textarea, input[type=text] { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; font:inherit; }
+  .counter { margin:4px 0 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>📐 Spec Checker</h1>
+  <div class="tabs">
+    <button class="active" data-tab="img">Ảnh / Dimension</button>
+    <button data-tab="txt">Ký tự</button>
+  </div>
+</header>
+
+<main>
+  <section id="tab-img">
+    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-top:12px">
+      <select id="mode">
+        <option value="auto">Tự nhận diện</option>
+        <option value="logo">App logo (vuông, ≥512×512)</option>
+        <option value="ios">iOS screenshot (2–8 ảnh)</option>
+        <option value="feature">Android feature graphic 1024×500</option>
+        <option value="phone">Android phone 1080×1920 (2–8 ảnh)</option>
+      </select>
+      <button id="btnFetch" class="primary">🔄 Lấy ảnh từ chat</button>
+      <button id="btnZip">📦 Tải tất cả (.zip)</button>
+      <button id="btnClear">Xoá hết</button>
+      <label style="padding:7px 12px;border:1px solid var(--line);border-radius:6px;cursor:pointer">+ Thêm file
+        <input id="file" type="file" accept="image/*,.zip,application/zip" multiple hidden></label>
+    </div>
+    <div class="drop" id="drop">Kéo thả ảnh hoặc <b>file .zip</b> (tải từ Drive) vào đây, hoặc dán (Ctrl+V) để đo</div>
+    <div id="links" class="box" hidden style="background:#fef3c7;color:#78350f"></div>
+    <div id="err" class="box bad" hidden></div>
+    <div id="status" class="box muted" hidden></div>
+    <div id="summary" class="box" hidden></div>
+    <table>
+      <thead><tr><th></th><th>Tên</th><th>Kích thước</th><th>Kết quả</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </section>
+
+  <section id="tab-txt" hidden>
+    <p style="margin-top:14px"><b>App name</b> (tối đa 30 ký tự)</p>
+    <input type="text" id="appName" placeholder="Nhập tên app...">
+    <div class="counter" id="nameCounter"></div>
+    <p><b>Văn bản bất kỳ</b></p>
+    <textarea id="anyText" rows="6" placeholder="Dán nội dung cần đếm ký tự..."></textarea>
+    <div class="counter muted" id="textCounter"></div>
+  </section>
+</main>
+
+<script>
+/* ===== Spec ===== */
+const IOS_SIZES = [[2556,1179],[1179,2556],[2622,1206],[1206,2622]];
+const RULES = {
+  logo:    { label:"App logo",        test:(w,h)=> w===h && w>=512, hint:"vuông, ≥512×512" },
+  ios:     { label:"iOS screenshot",  test:(w,h)=> IOS_SIZES.some(s=>s[0]===w&&s[1]===h), hint:"2556×1179 / 1179×2556 / 2622×1206 / 1206×2622", group:[2,8] },
+  feature: { label:"Feature graphic", test:(w,h)=> w===1024 && h===500, hint:"1024×500" },
+  phone:   { label:"Android phone",   test:(w,h)=> w===1080 && h===1920, hint:"1080×1920", group:[2,8] },
+};
+const items = []; // {id,key,name,url|null,blob|null,thumb,w,h}
+let uid = 0, waitTimer = null;
+const $ = (s)=>document.querySelector(s);
+const esc = s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const showErr = m=>{ const e=$("#err"); e.hidden=false; e.textContent="⚠ "+m; };
+const showStatus = m=>{ const e=$("#status"); e.hidden=!m; e.textContent=m||""; };
+
+/* ===== Tabs ===== */
+document.querySelectorAll(".tabs button").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll(".tabs button").forEach(x=>x.classList.toggle("active",x===b));
+  $("#tab-img").hidden = b.dataset.tab!=="img";
+  $("#tab-txt").hidden = b.dataset.tab!=="txt";
+});
+
+/* ===== Thêm ảnh ===== */
+function makeThumb(src, w, h){
+  const c = document.createElement("canvas"); c.width = c.height = 64; c.className = "th";
+  const s = Math.max(64/w, 64/h);
+  c.getContext("2d").drawImage(src, (64-w*s)/2, (64-h*s)/2, w*s, h*s); // vẽ ảnh cross-origin vẫn được
+  return c;
+}
+async function bitmapOf(blob){
+  if (window.createImageBitmap) { try { return await createImageBitmap(blob); } catch(e){} }
+  const url = await new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(blob); });
+  return await loadImg(url);
+}
+function loadImg(url){
+  return new Promise((res,rej)=>{ const i=new Image(); i.onload=()=>res(i); i.onerror=()=>rej(new Error("không tải được ảnh")); i.src=url; });
+}
+async function addBlob(blob,name){
+  try {
+    const bmp = await bitmapOf(blob);
+    const w = bmp.naturalWidth||bmp.width, h = bmp.naturalHeight||bmp.height;
+    items.push({id:++uid,key:name+uid,name,url:null,blob,thumb:makeThumb(bmp,w,h),w,h});
+  } catch(e){ showErr(`Không đọc được "${name}": ${e.message}`); }
+}
+async function addRemote(url,name){
+  if (items.some(i=>i.key===url)) return;
+  try {
+    const img = await loadImg(url); // Image() đo được kích thước dù không có CORS
+    const w = img.naturalWidth, h = img.naturalHeight;
+    let blob = null;
+    try { const r = await fetch(url); if (r.ok) blob = await r.blob(); } catch(e){} // có thể bị CORS chặn
+    items.push({id:++uid,key:url,name,url,blob,thumb:makeThumb(img,w,h),w,h});
+  } catch(e){ showErr(`Không đọc được "${name}": ${e.message}`); }
+}
+async function addFiles(files){
+  files = [...files];
+  if (!files.length) return;
+  for (const f of files) {
+    if (/\.zip$/i.test(f.name) || /zip/.test(f.type)) await addZip(f);
+    else await addBlob(f, f.name || "pasted-image.png");
+  }
+  showStatus("");
+  render();
+}
+// Drive tải cả folder về dưới dạng .zip → thả thẳng file zip vào đây, tool tự bung ảnh ra đo
+async function addZip(file){
+  try {
+    const zip = await JSZip.loadAsync(file);
+    const entries = Object.values(zip.files).filter(z=>!z.dir && /\.(png|jpe?g|webp|gif|bmp)$/i.test(z.name) && !/(^|\/)__MACOSX\//.test(z.name));
+    if (!entries.length) return showErr(`"${file.name}" không có ảnh nào bên trong (HEIC chưa được hỗ trợ).`);
+    for (let i=0;i<entries.length;i++){
+      showStatus(`Đang đọc ảnh ${i+1}/${entries.length} trong ${file.name}...`);
+      const en = entries[i];
+      const raw = await en.async("blob");
+      const type = /\.png$/i.test(en.name) ? "image/png" : /\.jpe?g$/i.test(en.name) ? "image/jpeg" : /\.webp$/i.test(en.name) ? "image/webp" : "image/gif";
+      await addBlob(new Blob([raw],{type}), en.name.split("/").pop());
+    }
+  } catch(e){ showErr(`Không mở được "${file.name}": ${e.message}`); }
+}
+$("#file").onchange = async e=>{ const fs=[...e.target.files]; e.target.value=""; await addFiles(fs); };
+const drop = $("#drop");
+document.addEventListener("dragover",e=>{e.preventDefault();drop.classList.add("over")});
+document.addEventListener("dragleave",()=>drop.classList.remove("over"));
+document.addEventListener("drop",e=>{e.preventDefault();drop.classList.remove("over");addFiles(e.dataTransfer.files)});
+document.addEventListener("paste",e=>addFiles(e.clipboardData.files));
+
+/* ===== Lấy ảnh từ chat qua widget (Crisp SDK) ===== */
+function requestImages(){
+  $("#err").hidden = true;
+  showStatus("Đang lấy ảnh từ chat...");
+  try { $crisp.forwardEvent("widget", { type:"modal-ready" }); }
+  catch(e){ showStatus(""); return showErr("SDK Crisp chưa sẵn sàng. Hãy mở modal từ widget trong Crisp."); }
+  clearTimeout(waitTimer);
+  waitTimer = setTimeout(()=>{
+    showStatus("");
+    showErr("Không nhận được dữ liệu từ widget. Kiểm tra token scope website:conversation:messages (read) của plugin.");
+  }, 5000);
+}
+async function loadRemote(list){
+  clearTimeout(waitTimer);
+  if (!list.length) { showStatus("Khách chưa gửi ảnh nào trong chat này."); return; }
+  showStatus(`Đang tải ${list.length} ảnh...`);
+  for (const im of list) await addRemote(im.url, im.name);
+  showStatus(`Đã lấy ${list.length} ảnh từ chat.`);
+  render();
+}
+window.CRISP_READY_TRIGGER = function(){
+  $crisp.onEventForwarded = (p)=>{
+    if (p && p.type==="images") { renderLinks(p.links||[]); loadRemote(p.images||[]); }
+  };
+  requestImages();
+};
+$("#btnFetch").onclick = requestImages;
+
+/* ===== Khách gửi link Drive / kho ảnh ngoài ===== */
+function providerOf(u){
+  try {
+    const h = new URL(u).hostname, p = new URL(u).pathname;
+    if (/drive\.google|docs\.google|goo\.gl/.test(h)) return /\/folders\//.test(p) ? "Google Drive (thư mục)" : "Google Drive";
+    if (/dropbox/.test(h)) return "Dropbox";
+    if (/wetransfer|we\.tl/.test(h)) return "WeTransfer";
+    if (/1drv|onedrive/.test(h)) return "OneDrive";
+    if (/icloud/.test(h)) return "iCloud";
+    if (/mega/.test(h)) return "MEGA";
+    return h;
+  } catch(e){ return "Link ngoài"; }
+}
+function openExternal(url){
+  try { $crisp.openLink(url); } catch(e){ window.open(url,"_blank","noopener"); }
+}
+function renderLinks(list){
+  const box = $("#links");
+  box.hidden = !list.length;
+  if (!list.length) return;
+  box.innerHTML = `<b>📁 Khách gửi ${list.length} link ảnh ngoài chat</b> — tool không đọc trực tiếp được ảnh trong các link này (cần đăng nhập/quyền truy cập).<br>
+    <b>Cách đo:</b> mở link → tải về máy (Drive: chuột phải thư mục → <i>Tải xuống</i> sẽ ra 1 file <code>.zip</code>) → <b>kéo thả file .zip (hoặc các ảnh) vào khung bên dưới</b>, tool sẽ tự bung ảnh và đo.
+    <ul style="margin:8px 0 0;padding-left:18px"></ul>`;
+  const ul = box.querySelector("ul");
+  list.forEach(l=>{
+    const li = document.createElement("li");
+    li.style.margin = "4px 0";
+    li.innerHTML = `<b>${esc(providerOf(l.url))}</b> · <span style="word-break:break-all">${esc(l.url)}</span> `;
+    const b = document.createElement("button");
+    b.textContent = "Mở link ↗"; b.style.marginLeft = "6px";
+    b.onclick = ()=>openExternal(l.url);
+    li.appendChild(b);
+    ul.appendChild(li);
+  });
+}
+
+/* ===== Tải tất cả ===== */
+$("#btnZip").onclick = async ()=>{
+  if (!items.length) return;
+  const zip = new JSZip(), used = {}, failed = [];
+  items.forEach(it=>{
+    if (!it.blob) return failed.push(it);
+    let n = it.name; if (!/\.\w{2,5}$/.test(n)) n += ".png";
+    used[n] = (used[n]||0)+1;
+    if (used[n]>1) n = n.replace(/(\.\w+)$/, `_${it.id}$1`);
+    zip.file(n, it.blob);
+  });
+  if (Object.keys(used).length) {
+    const blob = await zip.generateAsync({type:"blob"});
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = "chat-images.zip"; a.click();
+  }
+  if (failed.length && confirm(`${failed.length} ảnh bị trình duyệt chặn tải tự động (CORS). Mở từng ảnh ở tab mới để lưu thủ công?`)) {
+    failed.forEach(it=>{ try { $crisp.openLink(it.url); } catch(e){ window.open(it.url,"_blank"); } });
+  }
+};
+$("#btnClear").onclick = ()=>{ items.length=0; render(); };
+$("#mode").onchange = render;
+
+/* ===== Đánh giá ===== */
+function evaluate(it, mode){
+  if (mode==="auto") {
+    const m = Object.keys(RULES).filter(k=>RULES[k].test(it.w,it.h));
+    return { ok:m.length>0, text:m.length? m.map(k=>RULES[k].label).join(", ") : "Không khớp spec nào" };
+  }
+  const ok = RULES[mode].test(it.w,it.h);
+  return { ok, text: ok ? "Đạt" : "Cần: "+RULES[mode].hint };
+}
+function render(){
+  const mode = $("#mode").value, tb = $("#rows");
+  tb.innerHTML = ""; let pass = 0;
+  items.forEach(it=>{
+    const r = evaluate(it, mode); if (r.ok) pass++;
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td class="t"></td><td>${esc(it.name)}</td><td><b>${it.w}×${it.h}</b></td>
+      <td class="${r.ok?"ok":"bad"}">${r.ok?"✔":"✖"} ${esc(r.text)}</td><td><button>✕</button></td>`;
+    tr.querySelector(".t").appendChild(it.thumb);
+    tr.querySelector("button").onclick = ()=>{ items.splice(items.findIndex(x=>x.id===it.id),1); render(); };
+    tb.appendChild(tr);
+  });
+  const s = $("#summary"); s.hidden = !items.length;
+  let msg = `${pass}/${items.length} ảnh đạt`;
+  const g = mode!=="auto" && RULES[mode].group;
+  if (g) msg += pass>=g[0] && pass<=g[1] ? ` — ✔ số lượng hợp lệ (${g[0]}–${g[1]} ảnh)` : ` — ✖ cần ${g[0]}–${g[1]} ảnh đạt`;
+  s.textContent = msg;
+}
+
+/* ===== Ký tự ===== */
+const count = s=>[...s].length;
+$("#appName").oninput = e=>{
+  const n = count(e.target.value);
+  $("#nameCounter").innerHTML = `<span class="${n<=30?"ok":"bad"}">${n}/30 ký tự ${n<=30?"✔":"✖ vượt "+(n-30)}</span>`;
+};
+$("#anyText").oninput = e=>{
+  const v = e.target.value;
+  $("#textCounter").textContent = `${count(v)} ký tự • ${count(v.replace(/\s/g,""))} không tính khoảng trắng • ${v.trim()?v.trim().split(/\s+/).length:0} từ`;
+};
+$("#appName").dispatchEvent(new Event("input"));
+</script>
+<script src="https://assets.crisp.chat/widget/javascripts/sdk.min.js"></script>
+</body>
+</html>
