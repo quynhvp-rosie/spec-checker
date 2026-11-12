@@ -29,6 +29,17 @@
   .box { margin:10px 0; padding:8px 10px; border-radius:6px; background:var(--line); }
   textarea, input[type=text] { width:100%; padding:8px; border:1px solid var(--line); border-radius:6px; font:inherit; }
   .counter { margin:4px 0 14px; }
+  canvas.th, td.nm { cursor:pointer; }
+  /* Lightbox xem ảnh */
+  .lb { position:fixed; inset:0; background:rgba(15,23,42,.92); display:none; flex-direction:column; z-index:50; }
+  .lb.open { display:flex; }
+  .lbtop { display:flex; gap:12px; align-items:center; padding:10px 16px; color:#fff; }
+  .lbtop .grow { margin-right:auto; word-break:break-all; }
+  .lbwrap { flex:1; min-height:0; display:flex; align-items:center; justify-content:center; gap:8px; padding:0 8px; }
+  .lbwrap img { max-width:100%; max-height:100%; object-fit:contain; background:#fff; }
+  .lbnav { font-size:28px; padding:8px 14px; }
+  .lbbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:12px 16px; color:#e5e7eb; }
+  .lb .ok { color:#4ade80; } .lb .bad { color:#f87171; }
 </style>
 </head>
 <body>
@@ -56,6 +67,18 @@
       <label style="padding:7px 12px;border:1px solid var(--line);border-radius:6px;cursor:pointer">+ Thêm file
         <input id="file" type="file" accept="image/*,.zip,application/zip" multiple hidden></label>
     </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:10px">
+      <b>Ảnh khách gửi:</b>
+      <select id="range">
+        <option value="48h">48 giờ qua</option>
+        <option value="today">Hôm nay</option>
+        <option value="7d">7 ngày qua</option>
+        <option value="all">Tất cả</option>
+        <option value="custom">Chọn ngày...</option>
+      </select>
+      <span id="customRange" hidden>Từ <input type="date" id="dFrom"> đến <input type="date" id="dTo"></span>
+      <span class="muted" id="rangeInfo"></span>
+    </div>
     <div class="drop" id="drop">Kéo thả ảnh hoặc <b>file .zip</b> (tải từ Drive) vào đây, hoặc dán (Ctrl+V) để đo</div>
     <div id="links" class="box" hidden style="background:#fef3c7;color:#78350f"></div>
     <div id="err" class="box bad" hidden></div>
@@ -76,6 +99,25 @@
     <div class="counter muted" id="textCounter"></div>
   </section>
 </main>
+
+<div class="lb" id="lb">
+  <div class="lbtop">
+    <span class="grow" id="lbTitle"></span>
+    <b id="lbRes"></b>
+    <button id="lbClose">✕ Đóng (Esc)</button>
+  </div>
+  <div class="lbwrap">
+    <button class="lbnav" id="lbPrev">‹</button>
+    <img id="lbImg" alt="">
+    <button class="lbnav" id="lbNext">›</button>
+  </div>
+  <div class="lbbar">
+    <button class="primary" id="lbCopyImg">📋 Copy ảnh</button>
+    <button id="lbCopyMsg">💬 Copy lời nhắn gửi khách</button>
+    <button id="lbSave">💾 Tải ảnh</button>
+    <span id="lbHint"></span>
+  </div>
+</div>
 
 <script>
 /* ===== Spec ===== */
@@ -129,7 +171,7 @@ async function addRemote(url,name){
     const w = img.naturalWidth, h = img.naturalHeight;
     let blob = null;
     try { const r = await fetch(url); if (r.ok) blob = await r.blob(); } catch(e){} // có thể bị CORS chặn
-    items.push({id:++uid,key:url,name,url,blob,thumb:makeThumb(img,w,h),w,h});
+    items.push({id:++uid,key:url,name,url,blob,thumb:makeThumb(img,w,h),w,h,remote:true});
   } catch(e){ showErr(`Không đọc được "${name}": ${e.message}`); }
 }
 async function addFiles(files){
@@ -176,21 +218,55 @@ function requestImages(){
     showErr("Không nhận được dữ liệu từ widget. Kiểm tra token scope website:conversation:messages (read) của plugin.");
   }, 5000);
 }
-async function loadRemote(list){
+async function loadRemote(list, id){
   clearTimeout(waitTimer);
-  if (!list.length) { showStatus("Khách chưa gửi ảnh nào trong chat này."); return; }
+  if (!list.length) { showStatus("Không có ảnh khách gửi trong khoảng thời gian đã chọn."); render(); return; }
   showStatus(`Đang tải ${list.length} ảnh...`);
-  for (const im of list) await addRemote(im.url, im.name);
+  for (const im of list) {
+    if (id !== undefined && id !== applyId) return; // đã đổi mốc ngày → bỏ lượt tải cũ
+    await addRemote(im.url, im.name);
+  }
+  if (id !== undefined && id !== applyId) return;
   showStatus(`Đã lấy ${list.length} ảnh từ chat.`);
   render();
 }
 window.CRISP_READY_TRIGGER = function(){
   $crisp.onEventForwarded = (p)=>{
-    if (p && p.type==="images") { renderLinks(p.links||[]); loadRemote(p.images||[]); }
+    if (p && p.type==="images") { allRemote = p.images||[]; allLinks = p.links||[]; applyFilter(); }
   };
   requestImages();
 };
 $("#btnFetch").onclick = requestImages;
+
+/* ===== Lọc ảnh khách gửi theo khoảng ngày ===== */
+let allRemote = [], allLinks = [], applyId = 0;
+const tsOf = (o)=>{ const t = Number(o.ts); if (!t) return null; return t < 1e12 ? t*1000 : t; };
+function getRange(){
+  const v = $("#range").value, now = Date.now(), DAY = 864e5;
+  const today = new Date(); today.setHours(0,0,0,0);
+  if (v==="48h")   return { from: now-2*DAY, to: now };
+  if (v==="today") return { from: today.getTime(), to: now };
+  if (v==="7d")    return { from: now-7*DAY, to: now };
+  if (v==="custom") {
+    const f = $("#dFrom").value, t = $("#dTo").value;
+    return { from: f ? new Date(f+"T00:00:00").getTime() : 0, to: t ? new Date(t+"T23:59:59.999").getTime() : now };
+  }
+  return { from: 0, to: Infinity };
+}
+const inRange = (o,r)=>{ const t = tsOf(o); return t===null || (t>=r.from && t<=r.to); };
+async function applyFilter(){
+  const id = ++applyId, r = getRange();
+  $("#customRange").hidden = $("#range").value !== "custom";
+  for (let i=items.length-1;i>=0;i--) if (items[i].remote) items.splice(i,1); // giữ ảnh thêm thủ công
+  const imgs = allRemote.filter(o=>inRange(o,r));
+  $("#rangeInfo").textContent = `${imgs.length}/${allRemote.length} ảnh nằm trong khoảng đã chọn`;
+  renderLinks(allLinks.filter(o=>inRange(o,r)));
+  render();
+  await loadRemote(imgs, id);
+}
+$("#range").onchange = applyFilter;
+$("#dFrom").onchange = applyFilter;
+$("#dTo").onchange = applyFilter;
 
 /* ===== Khách gửi link Drive / kho ảnh ngoài ===== */
 function providerOf(u){
@@ -249,7 +325,91 @@ $("#btnZip").onclick = async ()=>{
   }
 };
 $("#btnClear").onclick = ()=>{ items.length=0; render(); };
-$("#mode").onchange = render;
+$("#mode").onchange = ()=>{ render(); if ($("#lb").classList.contains("open")) openLb(lbIndex); };
+
+/* ===== Xem ảnh (lightbox) + copy gửi lại khách ===== */
+let lbIndex = -1, lbObjUrl = null;
+const EN_NEED = {
+  logo: "a square image of at least 512×512 px",
+  ios: "2556×1179, 1179×2556, 2622×1206 or 1206×2622 px",
+  feature: "1024×500 px",
+  phone: "1080×1920 px",
+};
+function lbHint(msg){ $("#lbHint").textContent = msg; }
+function openLb(i){
+  const it = items[i]; if (!it) return;
+  lbIndex = i; lbHint("");
+  const img = $("#lbImg");
+  if (lbObjUrl) { URL.revokeObjectURL(lbObjUrl); lbObjUrl = null; }
+  if (it.blob) {
+    lbObjUrl = URL.createObjectURL(it.blob);
+    img.onerror = ()=>{ // dự phòng nếu blob URL bị chặn → dùng data URL
+      img.onerror = null;
+      const r = new FileReader(); r.onload = ()=>{ img.src = r.result; }; r.readAsDataURL(it.blob);
+    };
+    img.src = lbObjUrl;
+  } else { img.onerror = null; img.src = it.url; }
+  const r = evaluate(it, $("#mode").value);
+  $("#lbTitle").textContent = `${it.name}  (${i+1}/${items.length})`;
+  const res = $("#lbRes");
+  res.className = r.ok ? "ok" : "bad";
+  res.textContent = `${it.w}×${it.h}  ${r.ok?"✔":"✖"} ${r.text}`;
+  $("#lb").classList.add("open");
+}
+function closeLb(){ $("#lb").classList.remove("open"); }
+function stepLb(d){ if (items.length) openLb((lbIndex + d + items.length) % items.length); }
+$("#lbClose").onclick = closeLb;
+$("#lbPrev").onclick = ()=>stepLb(-1);
+$("#lbNext").onclick = ()=>stepLb(1);
+document.addEventListener("keydown", e=>{
+  if (!$("#lb").classList.contains("open")) return;
+  if (e.key==="Escape") closeLb();
+  if (e.key==="ArrowLeft") stepLb(-1);
+  if (e.key==="ArrowRight") stepLb(1);
+});
+function copyText(text){
+  const done = ()=>lbHint("✔ Đã copy lời nhắn — dán vào khung chat (Ctrl+V)");
+  const fallback = ()=>{ // execCommand hoạt động cả khi iframe không có quyền clipboard
+    const ta = document.createElement("textarea"); ta.value = text; ta.style.position="fixed"; ta.style.opacity="0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy") ? done() : lbHint("Không copy được, hãy bôi đen và copy thủ công."); } catch(e){ lbHint("Không copy được."); }
+    ta.remove();
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(text).then(done, fallback);
+  else fallback();
+}
+$("#lbCopyMsg").onclick = ()=>{
+  const it = items[lbIndex]; if (!it) return;
+  const mode = $("#mode").value;
+  const need = mode==="auto"
+    ? "one of the required store sizes (logo: square, at least 512×512 px; iOS: 2556×1179 / 1179×2556 / 2622×1206 / 1206×2622 px; feature graphic: 1024×500 px; phone: 1080×1920 px)"
+    : EN_NEED[mode];
+  copyText(`Hi! The image "${it.name}" is ${it.w}×${it.h} px, which doesn't match the required size (${need}). Could you please resend it with the correct dimensions? Thank you!`);
+};
+async function toPng(it){
+  const bmp = await bitmapOf(it.blob);
+  const c = document.createElement("canvas"); c.width = it.w; c.height = it.h;
+  c.getContext("2d").drawImage(bmp, 0, 0);
+  return await new Promise((res,rej)=>c.toBlob(b=>b?res(b):rej(new Error("toBlob")), "image/png"));
+}
+$("#lbCopyImg").onclick = async ()=>{
+  const it = items[lbIndex]; if (!it) return;
+  try {
+    if (!it.blob) throw new Error("no blob");
+    if (!navigator.clipboard || !window.ClipboardItem) throw new Error("no clipboard api");
+    const png = it.blob.type === "image/png" ? it.blob : await toPng(it);
+    await navigator.clipboard.write([new ClipboardItem({ "image/png": png })]);
+    lbHint("✔ Đã copy ảnh — vào khung chat và nhấn Ctrl+V");
+  } catch(e){
+    lbHint("Chưa copy tự động được. Chuột phải vào ảnh → Copy image (hoặc bấm Tải ảnh).");
+  }
+};
+$("#lbSave").onclick = ()=>{
+  const it = items[lbIndex]; if (!it) return;
+  if (!it.blob) { try { $crisp.openLink(it.url); } catch(e){ window.open(it.url,"_blank"); } return; }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(it.blob); a.download = it.name; a.click();
+};
 
 /* ===== Đánh giá ===== */
 function evaluate(it, mode){
@@ -269,6 +429,10 @@ function render(){
     tr.innerHTML = `<td class="t"></td><td>${esc(it.name)}</td><td><b>${it.w}×${it.h}</b></td>
       <td class="${r.ok?"ok":"bad"}">${r.ok?"✔":"✖"} ${esc(r.text)}</td><td><button>✕</button></td>`;
     tr.querySelector(".t").appendChild(it.thumb);
+    it.thumb.title = "Bấm để xem ảnh";
+    tr.querySelector(".t").onclick = ()=>openLb(items.indexOf(it));
+    tr.children[1].className = "nm";
+    tr.children[1].onclick = ()=>openLb(items.indexOf(it));
     tr.querySelector("button").onclick = ()=>{ items.splice(items.findIndex(x=>x.id===it.id),1); render(); };
     tb.appendChild(tr);
   });
