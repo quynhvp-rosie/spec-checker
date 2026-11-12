@@ -42,16 +42,16 @@
   function extractLinks(conv) {
     const out = [], seen = {};
     (conv && conv.messages || []).forEach((m) => {
-      if (m.from !== "user" || !isRecent(m) || m.type !== "text" || typeof m.content !== "string") return;
+      if (m.from !== "user" || m.type !== "text" || typeof m.content !== "string") return;
       (m.content.match(LINK_RE) || []).forEach((u) => {
         u = u.replace(/[.,;!?]+$/, "");
-        if (!seen[u]) { seen[u] = true; out.push({ url: u }); }
+        if (!seen[u]) { seen[u] = true; out.push({ url: u, ts: m.timestamp }); }
       });
     });
     return out;
   }
 
-  const VERSION = "v6";
+  const VERSION = "v7";
 
   // Tìm đệ quy object nào chứa mảng "messages", không phụ thuộc số lớp bọc
   function findMessages(o, depth) {
@@ -77,7 +77,7 @@
   function extractImages(conv) {
     const out = [], seen = {};
     (conv && conv.messages || []).forEach((m) => {
-      if (m.from !== "user" || !isRecent(m)) return;
+      if (m.from !== "user") return;
       const c = m.content;
       let url = null, name = null;
       if (m.type === "file" && c && typeof c === "object" && String(c.type || "").startsWith("image/")) {
@@ -87,7 +87,7 @@
       }
       if (url && !seen[url]) {
         seen[url] = true;
-        out.push({ url, name: name || decodeURIComponent(url.split("?")[0].split("/").pop() || "image") });
+        out.push({ url, ts: m.timestamp, name: name || decodeURIComponent(url.split("?")[0].split("/").pop() || "image") });
       }
     });
     return out;
@@ -119,8 +119,8 @@
         images = extractImages(conv);
         links = extractLinks(conv);
         let t = images.length
-          ? `Khách đã gửi ${images.length} ảnh trong ${WINDOW_HOURS} giờ qua.`
-          : `Khách chưa gửi ảnh nào trong ${WINDOW_HOURS} giờ qua.`;
+          ? `Đọc được ${images.length} ảnh khách gửi trong chat này. Mở bộ kiểm tra để chọn khoảng ngày.`
+          : "Chưa thấy ảnh nào khách gửi trong chat này.";
         if (links.length) t += ` Có ${links.length} link Drive/kho ảnh — mở bộ kiểm tra để xem hướng dẫn.`;
         document.getElementById("info").textContent = t;
       }
