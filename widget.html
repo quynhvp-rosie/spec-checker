@@ -28,12 +28,21 @@
   let modalOpen = false;
   let links = [];       // link kho ảnh ngoài khách gửi (Drive folder, Dropbox, WeTransfer...)
 
+  // Chỉ lấy tin nhắn trong khoảng thời gian này (giờ). Đổi số này nếu muốn rộng/hẹp hơn.
+  const WINDOW_HOURS = 48;
+  function isRecent(m) {
+    let ts = Number(m.timestamp);
+    if (!ts) return true;            // không có timestamp thì vẫn giữ lại
+    if (ts < 1e12) ts *= 1000;       // phòng trường hợp timestamp tính bằng giây
+    return Date.now() - ts <= WINDOW_HOURS * 3600 * 1000;
+  }
+
   // Tìm link Drive/kho lưu trữ trong tin nhắn text của khách
   const LINK_RE = /https?:\/\/(?:drive\.google\.com|docs\.google\.com|drive\.app\.goo\.gl|(?:www\.)?dropbox\.com|(?:www\.)?wetransfer\.com|we\.tl|1drv\.ms|onedrive\.live\.com|(?:www\.)?icloud\.com\/share|mega\.nz|(?:www\.)?box\.com)[^\s<>"')\]]*/gi;
   function extractLinks(conv) {
     const out = [], seen = {};
     (conv && conv.messages || []).forEach((m) => {
-      if (m.from !== "user" || m.type !== "text" || typeof m.content !== "string") return;
+      if (m.from !== "user" || !isRecent(m) || m.type !== "text" || typeof m.content !== "string") return;
       (m.content.match(LINK_RE) || []).forEach((u) => {
         u = u.replace(/[.,;!?]+$/, "");
         if (!seen[u]) { seen[u] = true; out.push({ url: u }); }
@@ -46,7 +55,7 @@
   function extractImages(conv) {
     const out = [], seen = {};
     (conv && conv.messages || []).forEach((m) => {
-      if (m.from !== "user") return;
+      if (m.from !== "user" || !isRecent(m)) return;
       const c = m.content;
       let url = null, name = null;
       if (m.type === "file" && c && typeof c === "object" && String(c.type || "").startsWith("image/")) {
@@ -71,10 +80,14 @@
   window.CRISP_READY_TRIGGER = function () {
     $crisp.onDataAcquired = (ns) => {
       if (ns !== "conversation") return;
-      const conv = $crisp.data.conversation;
+      const raw = $crisp.data.conversation;
+      // Crisp có thể bọc dữ liệu thật trong trường "data" → bóc ra nếu cần
+      let conv = raw;
+      if (raw && !raw.messages && raw.data && typeof raw.data === "object") conv = raw.data;
       if (!conv || !conv.messages) {
         // Chẩn đoán: liệt kê các trường Crisp thực sự trả về
-        const keys = conv ? Object.keys(conv).join(", ") : "(không có dữ liệu)";
+        const keys = (raw ? Object.keys(raw).join(", ") : "(không có dữ liệu)") +
+          (conv && conv !== raw ? " → bên trong data: " + Object.keys(conv).join(", ") : "");
         document.getElementById("info").textContent =
           "Chưa đọc được tin nhắn. Kiểm tra token scope website:conversation:messages (read). " +
           "[Debug] Trường nhận được: " + keys +
@@ -85,8 +98,8 @@
         images = extractImages(conv);
         links = extractLinks(conv);
         let t = images.length
-          ? `Khách đã gửi ${images.length} ảnh trong chat này.`
-          : "Khách chưa gửi ảnh nào trong chat này.";
+          ? `Khách đã gửi ${images.length} ảnh trong ${WINDOW_HOURS} giờ qua.`
+          : `Khách chưa gửi ảnh nào trong ${WINDOW_HOURS} giờ qua.`;
         if (links.length) t += ` Có ${links.length} link Drive/kho ảnh — mở bộ kiểm tra để xem hướng dẫn.`;
         document.getElementById("info").textContent = t;
       }
