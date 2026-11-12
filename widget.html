@@ -51,6 +51,28 @@
     return out;
   }
 
+  const VERSION = "v6";
+
+  // Tìm đệ quy object nào chứa mảng "messages", không phụ thuộc số lớp bọc
+  function findMessages(o, depth) {
+    depth = depth || 0;
+    if (!o || typeof o !== "object" || depth > 6) return null;
+    if (Array.isArray(o.messages)) return o;
+    for (const k of Object.keys(o)) {
+      const r = findMessages(o[k], depth + 1);
+      if (r) return r;
+    }
+    return null;
+  }
+  // Mô tả cấu trúc dữ liệu (chỉ tên trường, không có nội dung tin nhắn) để chẩn đoán
+  function shape(o, d) {
+    d = d || 0;
+    if (Array.isArray(o)) return "[" + o.length + " mục]";
+    if (!o || typeof o !== "object") return typeof o;
+    if (d >= 3) return "{...}";
+    return "{" + Object.keys(o).slice(0, 14).map((k) => k + ":" + shape(o[k], d + 1)).join(", ") + "}";
+  }
+
   // Lấy ảnh do khách gửi từ dữ liệu hội thoại Crisp (cần scope website:conversation:messages)
   function extractImages(conv) {
     const out = [], seen = {};
@@ -82,14 +104,13 @@
       if (ns !== "conversation") return;
       const raw = $crisp.data.conversation;
       // Crisp có thể bọc dữ liệu thật trong trường "data" → bóc ra nếu cần
-      let conv = raw;
-      if (raw && !raw.messages && raw.data && typeof raw.data === "object") conv = raw.data;
+      // Debug cho thấy cấu trúc lồng: data → conversation → (dữ liệu thật), nên bóc nhiều lớp
+      const conv = findMessages(raw) || raw;
       if (!conv || !conv.messages) {
         // Chẩn đoán: liệt kê các trường Crisp thực sự trả về
-        const keys = (raw ? Object.keys(raw).join(", ") : "(không có dữ liệu)") +
-          (conv && conv !== raw ? " → bên trong data: " + Object.keys(conv).join(", ") : "");
+        const keys = shape(raw);
         document.getElementById("info").textContent =
-          "Chưa đọc được tin nhắn. Kiểm tra token scope website:conversation:messages (read). " +
+          "[" + VERSION + "] Chưa đọc được tin nhắn. Kiểm tra token scope website:conversation:messages (read). " +
           "[Debug] Trường nhận được: " + keys +
           " | last_message: " + (conv && conv.last_message ? "có" : "không") +
           " | session_id: " + (new URLSearchParams(location.search).get("session_id") ? "có" : "không");
