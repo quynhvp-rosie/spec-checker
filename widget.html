@@ -73,8 +73,14 @@
       if (ns !== "conversation") return;
       const conv = $crisp.data.conversation;
       if (!conv || !conv.messages) {
+        // Chẩn đoán: liệt kê các trường Crisp thực sự trả về
+        const keys = conv ? Object.keys(conv).join(", ") : "(không có dữ liệu)";
         document.getElementById("info").textContent =
-          "Chưa đọc được tin nhắn. Kiểm tra token scope website:conversation:messages (read).";
+          "Chưa đọc được tin nhắn. Kiểm tra token scope website:conversation:messages (read). " +
+          "[Debug] Trường nhận được: " + keys +
+          " | last_message: " + (conv && conv.last_message ? "có" : "không") +
+          " | session_id: " + (new URLSearchParams(location.search).get("session_id") ? "có" : "không");
+        console.log("[SpecChecker] conversation data:", conv);
       } else {
         images = extractImages(conv);
         links = extractLinks(conv);
